@@ -1,0 +1,92 @@
+Screen {
+    background: #000000;
+    color: #00ff00;
+}
+
+#header {
+    background: #001100;
+    color: #00ff00;
+    dock: top;
+    height: 1;
+}
+
+Footer {
+    background: #001100;
+    color: #00aa00;
+    dock: bottom;
+    height: 1;
+}
+
+#main-container {
+    layout: horizontal;
+    height: 1fr;
+}
+
+#sidebar {
+    width: 26;
+    min-width: 26;
+    background: #001100;
+    border-right: solid #004400;
+    overflow-y: auto;
+    padding: 0;
+}
+
+#main-area {
+    width: 1fr;
+    layout: vertical;
+}
+
+#eval-log {
+    height: 2fr;
+    background: #000000;
+    border-bottom: solid #003300;
+}
+
+#market-table-container {
+    height: 1fr;
+    background: #000a00;
+    border-top: solid #003300;
+}
+
+#help-panel {
+    height: 1fr;
+    background: #001100;
+    border: solid #004400;
+    padding: 1 2;
+    overflow-y: auto;
+}
+
+RichLog {
+    background: #000000;
+    color: #00cc00;
+    scrollbar-color: #004400;
+    scrollbar-color-hover: #006600;
+    scrollbar-background: #001100;
+}
+
+DataTable {
+    background: #000a00;
+    color: #00cc00;
+    scrollbar-color: #004400;
+    scrollbar-background: #001100;
+}
+
+DataTable > .datatable--header {
+    background: #002200;
+    color: #00ff00;
+    text-style: bold;
+}
+
+DataTable > .datatable--cursor {
+    background: #003300;
+    color: #00ff00;
+}
+
+Static {
+    background: transparent;
+}
+
+Footer > .footer--key {
+    background: #002200;
+    color: #00ff00;
+}

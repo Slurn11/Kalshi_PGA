@@ -1,0 +1,20 @@
+# Secrets
+.env
+*.pem
+
+# Runtime data
+decisions.db
+decisions.db-shm
+decisions.db-wal
+bet_log.xlsx
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store

@@ -1,0 +1,6 @@
+requests>=2.31.0
+python-dotenv>=1.0.0
+cryptography>=41.0.0
+openpyxl>=3.1.0
+textual>=0.47.0
+textual-serve>=1.1.0
