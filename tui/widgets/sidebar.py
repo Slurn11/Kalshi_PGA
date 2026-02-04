@@ -48,7 +48,11 @@ class Sidebar(Static):
         _row(t, "Engine", f"{icon} {dm.status}", status_styles.get(dm.status, "#555555"))
         _row(t, "Uptime", dm.uptime_str)
         _row(t, "Cycles", str(dm.cycle_count))
-        _row(t, "Poll Interval", f"{dm.poll_interval}s")
+        interval_min = dm.poll_interval // 60
+        if interval_min >= 1:
+            _row(t, "Poll Interval", f"{interval_min}m")
+        else:
+            _row(t, "Poll Interval", f"{dm.poll_interval}s")
 
         # SETTINGS
         _heading(t, "SETTINGS")
@@ -72,23 +76,63 @@ class Sidebar(Static):
         else:
             t.append(" Waiting...\n", style="#555555")
 
-        # PERFORMANCE
-        _heading(t, "PERFORMANCE")
-        ps = dm.position_stats
-        acc = dm.accuracy_stats
-        clv = dm.clv_stats
-        if ps and (ps.get("open_count", 0) + ps.get("closed_count", 0)) > 0:
-            wr = acc.get("accuracy", 0) * 100 if acc else 0
-            wr_style = "#00ff00" if wr >= 50 else "#ff5555"
-            _row(t, "Win Rate", f"{wr:.0f}%", wr_style)
-            pnl = ps.get("total_realized_pnl", 0)
-            _row(t, "Profit", f"{pnl:+.0f}¢", "#00ff00" if pnl >= 0 else "#ff5555")
-            avg_clv = clv.get("avg_clv_cents", 0) if clv else 0
-            _row(t, "Avg CLV", f"{avg_clv:+.1f}¢", "#00ff00" if avg_clv >= 0 else "#ff5555")
-            _row(t, "Open Bets", str(ps.get("open_count", 0)))
-            _row(t, "Closed Bets", str(ps.get("closed_count", 0)), "#888888")
+        # RECOMMENDATIONS (agent BET decisions)
+        _heading(t, "RECOMMENDATIONS")
+        rec_stats = dm.recommendation_stats
+        if rec_stats and rec_stats.get("total_recommendations", 0) > 0:
+            total = rec_stats["total_recommendations"]
+            settled = rec_stats.get("settled", 0)
+            if settled > 0:
+                wr = rec_stats.get("win_rate", 0) * 100
+                wr_style = "#00ff00" if wr >= 50 else "#ff5555"
+                _row(t, "Win Rate", f"{wr:.0f}%", wr_style)
+                _row(t, "Record", f"{rec_stats['wins']}W-{rec_stats['losses']}L")
+            _row(t, "Total Recs", str(total), "#888888")
         else:
-            t.append(" No bets yet\n", style="#555555")
+            t.append(" No recommendations yet\n", style="#555555")
+
+        # MY BETS (manual positions)
+        _heading(t, "MY BETS")
+        manual = dm.manual_stats
+        if manual and (manual.get("open_count", 0) + manual.get("closed_count", 0)) > 0:
+            if manual.get("closed_count", 0) > 0:
+                wr = manual.get("win_rate", 0) * 100
+                wr_style = "#00ff00" if wr >= 50 else "#ff5555"
+                _row(t, "Win Rate", f"{wr:.0f}%", wr_style)
+                pnl = manual.get("total_realized_pnl", 0)
+                _row(t, "Profit", f"{pnl:+.0f}¢", "#00ff00" if pnl >= 0 else "#ff5555")
+                _row(t, "Record", f"{manual['wins']}W-{manual['losses']}L")
+            _row(t, "Open Bets", str(manual.get("open_count", 0)))
+        else:
+            t.append(" Press B to add bet\n", style="#555555")
+
+        # CLV STATS (for recommendations)
+        _heading(t, "CLV TRACKING")
+        clv = dm.clv_stats
+        if clv and clv.get("total_bets", 0) > 0:
+            avg_clv = clv.get("avg_clv_cents", 0)
+            _row(t, "Avg CLV", f"{avg_clv:+.1f}¢", "#00ff00" if avg_clv >= 0 else "#ff5555")
+            _row(t, "Positive CLV", f"{clv.get('positive_clv_pct', 0):.0f}%")
+        else:
+            t.append(" No CLV data yet\n", style="#555555")
+
+        # PHASE PERFORMANCE
+        phase_stats = dm.phase_stats
+        if phase_stats:
+            _heading(t, "BY PHASE")
+            phase_labels = {
+                "PRE_TOURNAMENT": "Pre-Tourney",
+                "LIVE_ROUND": "Live Rounds",
+                "BETWEEN_ROUNDS": "Between Rds",
+            }
+            for phase_key, label in phase_labels.items():
+                ps_phase = phase_stats.get(phase_key)
+                if ps_phase and ps_phase.get("total", 0) > 0:
+                    w = ps_phase["wins"]
+                    l = ps_phase["losses"]
+                    pnl = ps_phase.get("pnl", 0)
+                    pnl_style = "#00ff00" if pnl >= 0 else "#ff5555"
+                    _row(t, label, f"{w}W-{l}L | {pnl:+.0f}¢", pnl_style)
 
         # LAST ALERT
         if dm.last_alert_info:

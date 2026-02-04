@@ -12,15 +12,16 @@ def open_position(
     market_type: str,
     entry_price: float,
     entry_edge: float,
+    tournament_name: str = None,
 ) -> bool:
     """Open a new position. Returns False if ticker already has an OPEN position."""
     db = get_db()
     try:
         db.execute(
             """INSERT INTO positions
-            (ticker, player_name, market_type, entry_price, entry_edge, entry_timestamp, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'OPEN')""",
-            (ticker, player_name, market_type, entry_price, entry_edge, time.time()),
+            (ticker, player_name, market_type, entry_price, entry_edge, entry_timestamp, status, tournament_name)
+            VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?)""",
+            (ticker, player_name, market_type, entry_price, entry_edge, time.time(), tournament_name),
         )
         db.commit()
         logger.info(f"Opened position: {player_name} {market_type} @ {entry_price}¢")
@@ -114,3 +115,84 @@ def check_exit_conditions(
         return True, f"Edge flipped to {current_edge:+.1f}%"
 
     return False, ""
+
+
+def settle_open_positions(client) -> dict:
+    """Query Kalshi API for each open position and settle if market closed.
+
+    Args:
+        client: KalshiClient instance.
+
+    Returns:
+        dict with {settled: int, still_open: int, errors: list}
+    """
+    positions = get_open_positions()
+    result = {"settled": 0, "still_open": 0, "errors": []}
+
+    for pos in positions:
+        ticker = pos["ticker"]
+        try:
+            data = client._request("GET", f"/markets/{ticker}")
+            market = data.get("market", data)
+            status = market.get("status", "")
+            if status in ("settled", "finalized", "closed"):
+                market_result = market.get("result", "")
+                exit_price = 100.0 if market_result == "yes" else 0.0
+                close_position(ticker, exit_price)
+                logger.info(
+                    f"Settled position {pos['player_name']} {pos['market_type']}: "
+                    f"result={market_result}, exit={exit_price}¢"
+                )
+                result["settled"] += 1
+            else:
+                result["still_open"] += 1
+        except Exception as e:
+            logger.debug(f"Could not check market {ticker}: {e}")
+            result["errors"].append({"ticker": ticker, "error": str(e)})
+            result["still_open"] += 1
+
+    return result
+
+
+def settle_open_manual_positions(client) -> dict:
+    """Query Kalshi API for each open manual position and settle if market closed.
+
+    Args:
+        client: KalshiClient instance.
+
+    Returns:
+        dict with {settled: int, still_open: int, skipped: int, errors: list}
+    """
+    from database import get_open_manual_positions, close_manual_position_by_ticker
+
+    positions = get_open_manual_positions()
+    result = {"settled": 0, "still_open": 0, "skipped": 0, "errors": []}
+
+    for pos in positions:
+        ticker = pos.get("ticker")
+        if not ticker:
+            # No ticker - can't auto-settle
+            result["skipped"] += 1
+            continue
+
+        try:
+            data = client._request("GET", f"/markets/{ticker}")
+            market = data.get("market", data)
+            status = market.get("status", "")
+            if status in ("settled", "finalized", "closed"):
+                market_result = market.get("result", "")
+                exit_price = 100.0 if market_result == "yes" else 0.0
+                close_manual_position_by_ticker(ticker, exit_price)
+                logger.info(
+                    f"Settled manual position {pos['player_name']} {pos['market_type']}: "
+                    f"result={market_result}, exit={exit_price}¢"
+                )
+                result["settled"] += 1
+            else:
+                result["still_open"] += 1
+        except Exception as e:
+            logger.debug(f"Could not check market {ticker}: {e}")
+            result["errors"].append({"ticker": ticker, "error": str(e)})
+            result["still_open"] += 1
+
+    return result

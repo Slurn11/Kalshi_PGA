@@ -16,41 +16,47 @@ class MarketTableEmpty(Static):
 
 
 class MarketTable(DataTable):
-    """Top 10 current opportunities table."""
+    """Top 15 current opportunities table showing all verified positive edges."""
 
     def on_mount(self):
-        self.add_columns("#", "Player", "Type", "Model %", "Ask", "Spread", "Edge", "Signal")
+        self.add_columns("#", "Player", "Type", "Model %", "Ask", "Spread", "Edge", "Status")
         self.cursor_type = "row"
         self.zebra_stripes = True
         self.show_header = True
 
-    def update_markets(self, evaluations: list):
-        """Refresh table with current cycle evaluations sorted by edge."""
+    def update_markets(self, top_edges: list, min_edge: float = 7.0):
+        """Refresh table with all verified positive edges sorted by edge."""
         self.clear()
-        if not evaluations:
+        if not top_edges:
             return
-        sorted_evals = sorted(evaluations, key=lambda e: e.get("edge", 0), reverse=True)
-        for i, ev in enumerate(sorted_evals[:10], 1):
-            dg_pct = f"{ev['dg_prob'] * 100:.0f}%"
-            ask = f"{ev['ask']:.0f}¢"
-            spread = f"{ev['spread']:.0f}¢"
-            edge = f"{ev['edge']:+.1f}%"
-            decision = ev["decision"]
-            valid = ev.get("validation", "")
-            if decision == "BET":
-                signal = "✅ BET"
-            elif decision == "WATCH":
-                signal = "⏸️ WATCH"
+
+        for i, te in enumerate(top_edges[:15], 1):
+            dg_pct = f"{te['dg_prob'] * 100:.0f}%"
+            ask = f"{te['ask']:.0f}¢✓"  # All edges are verified now
+            bid = te.get('bid', 0)
+            spread = te['ask'] - bid if bid else 0
+            spread_str = f"{spread:.0f}¢"
+            edge = te['edge']
+            edge_str = f"{edge:+.1f}%"
+            bettable = te.get('bettable', edge >= min_edge)
+
+            # Status indicator based on edge size
+            if bettable:
+                status = "🟢 BETTABLE"
+            elif edge >= 5:
+                status = "🟡 CLOSE"
+            elif edge >= 3:
+                status = "🟡 watching"
             else:
-                signal = "· PASS"
+                status = "⚪ small"
 
             self.add_row(
                 str(i),
-                ev["player"],
-                ev["type"].upper(),
+                te["player"],
+                te["type"].upper(),
                 dg_pct,
                 ask,
-                spread,
-                edge,
-                signal,
+                spread_str,
+                edge_str,
+                status,
             )

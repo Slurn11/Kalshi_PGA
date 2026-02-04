@@ -90,3 +90,67 @@ Footer > .footer--key {
     background: #002200;
     color: #00ff00;
 }
+
+/* Phase badge styles */
+.phase-pre-tournament {
+    background: #0055aa;
+    color: #ffffff;
+}
+
+.phase-live {
+    background: #00ff00;
+    color: #000000;
+}
+
+.phase-between {
+    background: #ffff00;
+    color: #000000;
+}
+
+.phase-finished {
+    background: #333333;
+    color: #888888;
+}
+
+.phase-idle {
+    background: #111111;
+    color: #555555;
+}
+
+/* Modal dialog styles */
+AddBetScreen {
+    align: center middle;
+}
+
+#add-bet-dialog {
+    width: 60;
+    height: auto;
+    background: #001100;
+    border: solid #00aa00;
+    padding: 1 2;
+}
+
+#add-bet-title {
+    text-align: center;
+    margin-bottom: 1;
+}
+
+#add-bet-dialog Input {
+    margin-bottom: 1;
+    background: #002200;
+    border: solid #004400;
+}
+
+#add-bet-dialog Select {
+    margin-bottom: 1;
+    background: #002200;
+}
+
+#add-bet-buttons {
+    margin-top: 1;
+    align: center middle;
+}
+
+#add-bet-buttons Button {
+    margin: 0 1;
+}

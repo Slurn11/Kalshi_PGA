@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from models import ScanStage
+
 # Load defaults from config at module level
 try:
     import config as _cfg
@@ -35,7 +37,9 @@ class CycleSnapshot:
     alerts_sent: int = 0
     positions_checked: int = 0
     leaderboard: dict = field(default_factory=dict)
+    tournament_name: str = ""
     error: Optional[str] = None
+    top_edges: list = field(default_factory=list)  # All verified positive edges for display
 
 
 class DataManager:
@@ -66,11 +70,37 @@ class DataManager:
         self.max_spread: int = MAX_SPREAD
         # Countdown
         self.next_cycle_countdown: int = 0
+        # Phase tracking
+        self.phase: str = "IDLE"
+        self.tournament_name: str = ""
+        # Stage log for pipeline visibility
+        self.stage_log: list[ScanStage] = []
+        # Force scan event
+        self.force_scan: asyncio.Event = asyncio.Event()
+        # Phase stats
+        self.phase_stats: dict = {}
+        # Manual position stats
+        self.manual_stats: dict = {}
+        # Recommendation stats
+        self.recommendation_stats: dict = {}
         # Notify callback
         self._on_update = None
+        self._on_stage = None
 
     def set_update_callback(self, callback):
         self._on_update = callback
+
+    def set_stage_callback(self, callback):
+        self._on_stage = callback
+
+    def clear_stage_log(self):
+        self.stage_log = []
+
+    async def push_stage(self, stage: ScanStage):
+        async with self._lock:
+            self.stage_log.append(stage)
+        if self._on_stage:
+            self._on_stage(stage)
 
     async def update_cycle(self, snapshot: CycleSnapshot):
         async with self._lock:

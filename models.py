@@ -1,4 +1,13 @@
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ScanStage:
+    """Represents a single stage in the scan pipeline."""
+    name: str       # "fetch_dg", "discover_markets", "match_players", etc.
+    data: dict = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -10,6 +19,7 @@ class KalshiMarket:
     yes_bid: float
     no_ask: float
     no_bid: float
+    verified: bool = False  # True if prices confirmed from live orderbook
 
     @property
     def implied_probability(self) -> float:

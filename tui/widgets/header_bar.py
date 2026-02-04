@@ -7,6 +7,15 @@ from textual.widgets import Static
 from rich.text import Text
 
 
+PHASE_BADGES = {
+    "PRE_TOURNAMENT": (" PRE-TOURNAMENT ", "bold #ffffff on #0055aa"),
+    "LIVE_ROUND": (" LIVE R{round} ", "bold #000000 on #00ff00"),
+    "BETWEEN_ROUNDS": (" BETWEEN ROUNDS ", "bold #000000 on #ffff00"),
+    "FINISHED": (" FINISHED ", "#888888 on #333333"),
+    "IDLE": (" IDLE ", "#555555 on #111111"),
+}
+
+
 class HeaderBar(Static):
     """Single-line header with tournament info, status, connections, clock."""
 
@@ -17,18 +26,25 @@ class HeaderBar(Static):
     kalshi_ok = reactive(False)
     claude_ok = reactive(True)
     countdown = reactive(0)
+    phase = reactive("IDLE")
+    round_num = reactive(0)
 
     def render(self) -> Text:
         t = Text()
         t.append(" ⛳ PGA GOLF AGENT", style="bold #00ff00")
 
-        # Tournament name or idle message
+        # Phase badge
+        badge_template, badge_style = PHASE_BADGES.get(
+            self.phase, (" IDLE ", "#555555 on #111111")
+        )
+        badge_label = badge_template.format(round=self.round_num or "?")
+        t.append(f"  {badge_label}", style=badge_style)
+
+        # Tournament name
         if self.tournament_name:
             t.append(f"  {self.tournament_name}", style="bold #00cc00")
-            if self.round_indicator:
-                t.append(f"  {self.round_indicator}", style="bold #00ff00")
-        else:
-            t.append("  No Live Tournament", style="#555555")
+        elif self.phase not in ("IDLE", "FINISHED"):
+            t.append("  PGA Tournament", style="#00cc00")
 
         t.append("  ", style="")
 
@@ -57,7 +73,11 @@ class HeaderBar(Static):
         # Countdown + clock
         now = datetime.now().strftime("%H:%M:%S")
         if self.countdown > 0:
-            t.append(f"  next scan {self.countdown}s", style="#555555")
+            mins, secs = divmod(self.countdown, 60)
+            if mins:
+                t.append(f"  next scan {mins}m{secs:02d}s", style="#555555")
+            else:
+                t.append(f"  next scan {secs}s", style="#555555")
         t.append(f"  {now}", style="#00aa00")
 
         return t

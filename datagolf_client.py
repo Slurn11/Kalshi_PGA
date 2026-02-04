@@ -8,6 +8,7 @@ import config
 logger = logging.getLogger(__name__)
 
 LIVE_PREDS_URL = "https://feeds.datagolf.com/preds/in-play"
+PRE_TOURNAMENT_URL = "https://feeds.datagolf.com/preds/pre-tournament"
 BOOK_ODDS_URL = "https://feeds.datagolf.com/betting/source-matchup-odds"
 SKILL_URL = "https://feeds.datagolf.com/preds/player-decompositions"
 
@@ -226,6 +227,63 @@ def get_player_skill_breakdown() -> dict[str, dict[str, float]]:
 
     _cached_skill_data = result
     logger.info(f"Skill data: {len(result)} players")
+    return result
+
+
+def get_pre_tournament_probabilities() -> dict[str, dict[str, float]]:
+    """Fetch pre-tournament probabilities from Data Golf.
+
+    Returns dict mapping player name to probability dict, same structure as live.
+    Includes special key '_tournament_name' with the event name.
+    """
+    try:
+        resp = requests.get(
+            PRE_TOURNAMENT_URL,
+            params={
+                "tour": "pga",
+                "odds_format": "percent",
+                "file_format": "json",
+                "key": config.DATAGOLF_API_KEY,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        logger.error(f"Data Golf pre-tournament fetch failed: {e}")
+        return {}
+
+    if not data:
+        return {}
+
+    # Extract tournament name if present
+    tournament_name = ""
+    if isinstance(data, dict):
+        tournament_name = data.get("event_name", data.get("tournament", ""))
+        players = data.get("data", data.get("players", data.get("baseline_history_fit", [])))
+    elif isinstance(data, list):
+        players = data
+    else:
+        return {}
+
+    if not isinstance(players, list):
+        return {}
+
+    result = {"_tournament_name": tournament_name} if tournament_name else {}
+    for p in players:
+        raw_name = p.get("player_name", "").strip()
+        if not raw_name:
+            continue
+        name = _normalize_name(raw_name)
+        result[name] = {
+            "win": _to_float(p.get("win", 0)) * 100,
+            "top_5": _to_float(p.get("top_5", 0)) * 100,
+            "top_10": _to_float(p.get("top_10", 0)) * 100,
+            "top_20": _to_float(p.get("top_20", 0)) * 100,
+            "make_cut": _to_float(p.get("make_cut", 0)) * 100,
+        }
+
+    logger.info(f"Data Golf: {len(result) - (1 if '_tournament_name' in result else 0)} players with pre-tournament probabilities")
     return result
 
 

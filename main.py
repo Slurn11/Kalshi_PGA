@@ -10,12 +10,14 @@ from agent import evaluate_opportunity
 from alerts import send_recommendation, send_sell_alert
 from bet_logger import log_recommendation
 from positions import open_position, get_open_positions, close_position, check_exit_conditions
-from datagolf_client import get_live_probabilities, get_leaderboard, get_book_odds, get_player_skill_breakdown, clear_cycle_cache
+from datagolf_client import get_live_probabilities, get_leaderboard, get_book_odds, get_player_skill_breakdown, clear_cycle_cache, get_pre_tournament_probabilities
 from kalshi_client import KalshiClient
 from telegram_commands import check_commands
 from kelly import kelly_stake, format_stake_recommendation
 from edge_validator import validate_edge
 from edge_adjustments import get_min_edge_for_round
+from models import ScanStage
+from tournament_state import detect_phase, get_poll_interval, TournamentPhase
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 NO_TOURNAMENT_INTERVAL = 3600  # 1 hour when no live tournament
 MIN_EDGE_TO_EVALUATE = 8.0  # Don't waste API calls on tiny edges
+MIN_EDGE_TO_DISPLAY = 1.0   # Show edges >= 1% in the display for visibility
 MAX_SPREAD = 15  # Skip markets with bid/ask spread > 15¢
 
 
@@ -42,7 +45,9 @@ class CycleResult:
     alerts_sent: int = 0
     positions_checked: int = 0
     leaderboard: dict = field(default_factory=dict)
+    tournament_name: str = ""
     error: Optional[str] = None
+    top_edges: list = field(default_factory=list)  # All verified positive edges for display
 
     def __int__(self):
         """Backward compat: int(result) returns alerts_sent."""
@@ -57,8 +62,27 @@ class CycleResult:
         return NotImplemented
 
 
+# Known name aliases: Kalshi name -> Data Golf name
+NAME_ALIASES = {
+    "S.H. Kim": "Seonghyeon Kim",
+    "S.Y. Kim": "Siyun Kim",
+    "S.I. Kim": "Si Woo Kim",
+    "C.T. Pan": "Cheng Tsung Pan",
+    "K.H. Lee": "Kyoung Hoon Lee",
+    "S.W. Kim": "Sung Woo Kim",
+    "B.Y. An": "Byeong Hun An",
+    "M.J. Daffue": "MJ Daffue",
+}
+
+
 def match_name(name: str, names: list[str]) -> Optional[str]:
-    matches = difflib.get_close_matches(name, names, n=1, cutoff=0.6)
+    # Check aliases first
+    if name in NAME_ALIASES:
+        alias = NAME_ALIASES[name]
+        if alias in names:
+            return alias
+    # Use 0.75 cutoff to prevent false matches like "Kevin Yu" → "Kevin Roy"
+    matches = difflib.get_close_matches(name, names, n=1, cutoff=0.75)
     return matches[0] if matches else None
 
 
@@ -71,31 +95,60 @@ MARKET_TYPE_TO_DG_KEY = {
 }
 
 
-def run_cycle(client: KalshiClient) -> CycleResult:
-    """Run one poll cycle. Returns CycleResult with full cycle data."""
+def run_cycle(client: KalshiClient, on_stage=None, betting_phase: str = "") -> CycleResult:
+    """Run one poll cycle. Returns CycleResult with full cycle data.
+
+    Args:
+        client: KalshiClient instance.
+        on_stage: Optional callback(ScanStage) for pipeline visibility.
+        betting_phase: Current tournament phase string for DB logging.
+    """
+    def _stage(name, **data):
+        if on_stage:
+            on_stage(ScanStage(name=name, data=data))
+
     result = CycleResult(timestamp=time.time())
     clear_cycle_cache()
 
     # 1. Fetch Data Golf probabilities
     logger.info("Fetching Data Golf live probabilities...")
+    _stage("fetch_data", status="fetching")
     dg_probs = get_live_probabilities()
+
+    # If no live data, try pre-tournament
+    dg_pre_data = None
     if not dg_probs:
-        logger.info("No live Data Golf data (tournament may not be active)")
+        logger.info("No live data, trying pre-tournament endpoint...")
+        dg_pre_data = get_pre_tournament_probabilities()
+        if dg_pre_data:
+            # Use pre-tournament data as the probability source
+            # Filter out metadata keys
+            dg_probs = {k: v for k, v in dg_pre_data.items() if not k.startswith("_")}
+            if dg_pre_data.get("_tournament_name"):
+                result.tournament_name = dg_pre_data["_tournament_name"]
+
+    if not dg_probs:
+        logger.info("No Data Golf data (tournament may not be active)")
+        _stage("fetch_data", status="empty", players=0)
         result.tournament_active = False
         return result
 
     result.tournament_active = True
     result.players_loaded = len(dg_probs)
+    _stage("fetch_data", status="ok", players=len(dg_probs))
     logger.info(f"Data Golf: {len(dg_probs)} players")
 
     # 2. Fetch Kalshi markets
     logger.info("Discovering Kalshi golf markets...")
+    _stage("discover_markets", status="fetching")
     markets = client.discover_golf_markets()
     if not markets:
         logger.info("No Kalshi golf markets found")
+        _stage("discover_markets", status="empty", count=0)
         return result
 
     result.markets_found = len(markets)
+    _stage("discover_markets", status="ok", count=len(markets))
     logger.info(f"Found {len(markets)} Kalshi golf markets")
 
     # 3. Build leaderboard from Data Golf data (already fetched above)
@@ -107,9 +160,16 @@ def run_cycle(client: KalshiClient) -> CycleResult:
     dg_names = list(dg_probs.keys())
 
     # Determine round number from leaderboard for edge adjustments
-    round_num = 3  # default
-    if leaderboard:
-        rounds = [v.get("round_number", 3) for v in leaderboard.values()]
+    round_num = 0  # 0 = pre-tournament / unknown
+    if dg_pre_data:
+        # Using pre-tournament data, so round = 0 regardless of stale leaderboard
+        round_num = 0
+    elif betting_phase == "BETWEEN_ROUNDS":
+        # Between rounds uses same edge logic as pre-tournament
+        round_num = 0
+    elif leaderboard:
+        rounds = [v.get("round_number", 0) for v in leaderboard.values()]
+        rounds = [r for r in rounds if r > 0]  # filter out unknowns
         if rounds:
             round_num = max(set(rounds), key=rounds.count)  # mode
 
@@ -120,6 +180,25 @@ def run_cycle(client: KalshiClient) -> CycleResult:
 
     # Fetch optional data sources
     skill_data = get_player_skill_breakdown()
+
+    # Pre-scan: count matches and edges for stage reporting
+    matched_count = 0
+    unmatched_names = []
+    all_edges = []  # Track ALL edge calculations for visibility
+    positive_edges = []
+    edge_filtered = []
+    spread_filtered = []
+    stale_filtered = []
+
+    for market in markets:
+        dg_match = match_name(market.golfer_name, dg_names)
+        if dg_match:
+            matched_count += 1
+        else:
+            unmatched_names.append(market.golfer_name)
+
+    _stage("match_players", matched=matched_count, unmatched=len(unmatched_names),
+           unmatched_names=unmatched_names[:10])
 
     for market in markets:
         # Match player name to Data Golf
@@ -142,18 +221,54 @@ def run_cycle(client: KalshiClient) -> CycleResult:
 
         edge_pct = (dg_prob - impl_prob) * 100
 
-        # Round-adjusted edge threshold
-        if edge_pct < min_edge:
-            if edge_pct > 0:
-                logger.info(
-                    f"Skipping {dg_match} {market.market_type}: "
-                    f"Edge too low ({edge_pct:+.1f}% < {min_edge:.1f}% threshold)"
-                )
-                result.skipped.append({
-                    "player": dg_match, "type": market.market_type,
-                    "reason": "edge_too_low", "edge": edge_pct,
-                })
+        # Skip markets with no meaningful edge (below display threshold)
+        if edge_pct < MIN_EDGE_TO_DISPLAY:
             continue
+
+        # CRITICAL: Refresh prices from live orderbook to eliminate phantom edges
+        # We verify ALL markets with edge >= 1% so we can display them
+        old_ask = market.yes_ask
+        old_bid = market.yes_bid
+        try:
+            client.refresh_market_prices(market)
+        except Exception as e:
+            logger.warning(f"Failed to refresh orderbook for {market.ticker}: {e}")
+            # Continue with cached prices if orderbook fetch fails
+
+        # Recalculate edge with REAL prices
+        impl_prob = market.implied_probability
+        edge_pct = (dg_prob - impl_prob) * 100
+
+        # Log if price changed significantly (2+ cents)
+        if abs(market.yes_ask - old_ask) >= 2:
+            logger.debug(
+                f"Price moved for {dg_match} {market.market_type}: "
+                f"API said {old_ask:.0f}¢, orderbook shows {market.yes_ask:.0f}¢"
+            )
+
+        # Skip if edge dropped below display threshold after verification
+        if edge_pct < MIN_EDGE_TO_DISPLAY:
+            stale_filtered.append({
+                "player": dg_match, "type": market.market_type,
+                "old_ask": old_ask, "new_ask": market.yes_ask,
+            })
+            continue
+
+        # Mark as verified for display
+        market.verified = True
+
+        # Add ALL verified positive edges to display list
+        all_edges.append({
+            "player": dg_match, "type": market.market_type,
+            "dg_prob": dg_prob, "ask": market.yes_ask, "bid": market.yes_bid,
+            "edge": edge_pct, "verified": True,
+            "bettable": edge_pct >= min_edge,
+        })
+
+        # Track edges below betting threshold (but above display threshold)
+        if edge_pct < min_edge:
+            edge_filtered.append({"player": dg_match, "type": market.market_type, "edge": edge_pct})
+            continue  # Don't send to Claude, but it's in all_edges for display
 
         spread = market.yes_ask - market.yes_bid
         if spread > MAX_SPREAD:
@@ -165,6 +280,7 @@ def run_cycle(client: KalshiClient) -> CycleResult:
                 "player": dg_match, "type": market.market_type,
                 "reason": "spread_too_wide", "spread": spread,
             })
+            spread_filtered.append({"player": dg_match, "type": market.market_type, "spread": spread})
             continue
 
         # Get leaderboard context
@@ -187,6 +303,7 @@ def run_cycle(client: KalshiClient) -> CycleResult:
                     "player": dg_match, "type": market.market_type,
                     "reason": "stale_price",
                 })
+                stale_filtered.append({"player": dg_match, "type": market.market_type, "ask": market.yes_ask})
                 continue
 
         # Fetch book odds and validate edge (optional)
@@ -222,7 +339,13 @@ def run_cycle(client: KalshiClient) -> CycleResult:
             score_to_par=lb_context.get("score_to_par") if lb_context else None,
             round_number=lb_context.get("round_number") if lb_context else None,
             holes_completed=lb_context.get("thru") if lb_context else None,
+            betting_phase=betting_phase,
         )
+
+        # Stage: evaluating
+        _stage("evaluating", player=dg_match, type=market.market_type,
+               dg_prob=dg_prob, ask=market.yes_ask, bid=market.yes_bid,
+               spread=spread, edge=edge_pct, kelly=kelly_rec)
 
         # Agent evaluation
         logger.info(
@@ -243,6 +366,12 @@ def run_cycle(client: KalshiClient) -> CycleResult:
             skill_data=player_skill,
         )
 
+        # Stage: claude_decision
+        _stage("claude_decision", player=dg_match, type=market.market_type,
+               decision=eval_result["decision"],
+               confidence=eval_result.get("confidence", 0),
+               reasoning=eval_result.get("reasoning", ""))
+
         # Log decision
         database.log_decision(
             opportunity_id=opp_id,
@@ -250,6 +379,7 @@ def run_cycle(client: KalshiClient) -> CycleResult:
             reasoning=eval_result["reasoning"],
             confidence=eval_result.get("confidence"),
             suggested_stake_pct=eval_result.get("suggested_stake_pct"),
+            betting_phase=betting_phase,
         )
 
         logger.info(f"Agent decision: {eval_result['decision']} — {eval_result['reasoning'][:100]}")
@@ -269,6 +399,7 @@ def run_cycle(client: KalshiClient) -> CycleResult:
             "confidence": eval_result.get("confidence", 0),
             "reasoning": eval_result.get("reasoning", ""),
             "validation": validation_dict.get("confidence", ""),
+            "verified": getattr(market, "verified", False),
         })
 
         # Log all decisions to Excel
@@ -314,10 +445,33 @@ def run_cycle(client: KalshiClient) -> CycleResult:
                     market_type=market.market_type,
                     entry_price=market.yes_ask,
                     entry_edge=edge_pct,
+                    tournament_name=result.tournament_name or None,
                 )
                 database.record_entry_for_clv(
                     market.ticker, dg_match, market.market_type, market.yes_ask
                 )
+
+    # Stage: scan_complete
+    bet_count = sum(1 for e in result.evaluations if e["decision"] == "BET")
+    watch_count = sum(1 for e in result.evaluations if e["decision"] == "WATCH")
+    pass_count = sum(1 for e in result.evaluations if e["decision"] == "PASS")
+    # Top 20 edges for display (sorted by edge descending)
+    top_edges = sorted(all_edges, key=lambda x: x["edge"], reverse=True)[:20]
+    result.top_edges = top_edges  # Store for MarketTable display
+    positive_edge_count = len(all_edges)
+    bettable_edge_count = sum(1 for e in all_edges if e.get("bettable"))
+    _stage("scan_complete",
+           evaluated=len(result.evaluations),
+           bets=bet_count, watches=watch_count, passes=pass_count,
+           alerts=result.alerts_sent,
+           edge_filtered=len(edge_filtered),
+           spread_filtered=len(spread_filtered),
+           stale_filtered=len(stale_filtered),
+           duration=time.time() - result.timestamp,
+           top_edges=top_edges,
+           positive_edges=positive_edge_count,
+           bettable_edges=bettable_edge_count,
+           min_edge=min_edge)
 
     # 5. Check open positions for exit conditions
     positions = get_open_positions()

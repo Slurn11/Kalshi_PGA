@@ -68,12 +68,27 @@ CREATE TABLE IF NOT EXISTS clv_tracking (
     timestamp REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS manual_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT,
+    player_name TEXT NOT NULL,
+    market_type TEXT NOT NULL,
+    tournament_name TEXT,
+    entry_price REAL NOT NULL,
+    entry_timestamp REAL NOT NULL,
+    exit_price REAL,
+    exit_timestamp REAL,
+    profit_loss REAL,
+    status TEXT NOT NULL DEFAULT 'OPEN' CHECK(status IN ('OPEN', 'CLOSED'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_opp_player ON opportunities(player_name);
 CREATE INDEX IF NOT EXISTS idx_opp_market_type ON opportunities(market_type);
 CREATE INDEX IF NOT EXISTS idx_decisions_decision ON decisions(decision);
 CREATE INDEX IF NOT EXISTS idx_outcomes_result ON outcomes(result);
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_clv_ticker ON clv_tracking(ticker);
+CREATE INDEX IF NOT EXISTS idx_manual_positions_status ON manual_positions(status);
 """
 
 
@@ -88,6 +103,19 @@ def get_db() -> sqlite3.Connection:
 def init_db():
     db = get_db()
     db.executescript(SCHEMA)
+    # Add betting_phase column if not present (idempotent)
+    for table in ("opportunities", "decisions"):
+        try:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN betting_phase TEXT")
+            db.commit()
+        except Exception:
+            pass  # column already exists
+    # Add tournament_name column to positions if not present
+    try:
+        db.execute("ALTER TABLE positions ADD COLUMN tournament_name TEXT")
+        db.commit()
+    except Exception:
+        pass  # column already exists
     db.close()
 
 
@@ -102,17 +130,18 @@ def log_opportunity(
     score_to_par: Optional[int] = None,
     round_number: Optional[int] = None,
     holes_completed: Optional[int] = None,
+    betting_phase: Optional[str] = None,
 ) -> int:
     db = get_db()
     cur = db.execute(
         """INSERT INTO opportunities
         (timestamp, player_name, market_ticker, market_type, dg_prob,
          kalshi_implied_prob, edge_pct, leaderboard_position, score_to_par,
-         round_number, holes_completed)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         round_number, holes_completed, betting_phase)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (time.time(), player_name, market_ticker, market_type, dg_prob,
          kalshi_implied_prob, edge_pct, leaderboard_position, score_to_par,
-         round_number, holes_completed),
+         round_number, holes_completed, betting_phase),
     )
     db.commit()
     opp_id = cur.lastrowid
@@ -126,13 +155,14 @@ def log_decision(
     reasoning: str,
     confidence: Optional[float] = None,
     suggested_stake_pct: Optional[float] = None,
+    betting_phase: Optional[str] = None,
 ) -> int:
     db = get_db()
     cur = db.execute(
         """INSERT INTO decisions
-        (opportunity_id, decision, reasoning, confidence, suggested_stake_pct, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?)""",
-        (opportunity_id, decision, reasoning, confidence, suggested_stake_pct, time.time()),
+        (opportunity_id, decision, reasoning, confidence, suggested_stake_pct, timestamp, betting_phase)
+        VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (opportunity_id, decision, reasoning, confidence, suggested_stake_pct, time.time(), betting_phase),
     )
     db.commit()
     dec_id = cur.lastrowid
@@ -296,6 +326,159 @@ def get_clv_stats() -> dict:
         "wins": row["wins"] or 0,
         "avg_clv_wins": round(row["avg_clv_wins"] or 0, 1),
         "avg_clv_losses": round(row["avg_clv_losses"] or 0, 1),
+    }
+
+
+def get_stats_by_phase() -> dict:
+    """Get win/loss/pnl stats grouped by betting phase."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT d.betting_phase, out.result, COUNT(*) as cnt,
+                  SUM(CASE WHEN p.profit_loss IS NOT NULL THEN p.profit_loss ELSE 0 END) as pnl
+           FROM decisions d
+           JOIN opportunities o ON o.id = d.opportunity_id
+           LEFT JOIN outcomes out ON out.opportunity_id = o.id
+           LEFT JOIN positions p ON p.ticker = o.market_ticker
+           WHERE d.decision = 'BET' AND out.result IN ('WIN', 'LOSS')
+           GROUP BY d.betting_phase, out.result"""
+    ).fetchall()
+    db.close()
+
+    stats = {}
+    for r in rows:
+        phase = r["betting_phase"] or "UNKNOWN"
+        if phase not in stats:
+            stats[phase] = {"wins": 0, "losses": 0, "total": 0, "pnl": 0}
+        if r["result"] == "WIN":
+            stats[phase]["wins"] = r["cnt"]
+        elif r["result"] == "LOSS":
+            stats[phase]["losses"] = r["cnt"]
+        stats[phase]["pnl"] += r["pnl"] or 0
+    for phase in stats:
+        stats[phase]["total"] = stats[phase]["wins"] + stats[phase]["losses"]
+    return stats
+
+
+# Manual position functions (user's actual bets, separate from recommendations)
+
+def add_manual_position(
+    player_name: str,
+    market_type: str,
+    entry_price: float,
+    tournament_name: Optional[str] = None,
+    ticker: Optional[str] = None,
+) -> int:
+    """Add a manually entered bet position. Returns the position ID."""
+    db = get_db()
+    cur = db.execute(
+        """INSERT INTO manual_positions
+        (ticker, player_name, market_type, tournament_name, entry_price, entry_timestamp, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'OPEN')""",
+        (ticker, player_name, market_type, tournament_name, entry_price, time.time()),
+    )
+    db.commit()
+    pos_id = cur.lastrowid
+    db.close()
+    return pos_id
+
+
+def close_manual_position(position_id: int, won: bool):
+    """Close a manual position with win/loss outcome."""
+    db = get_db()
+    row = db.execute(
+        "SELECT entry_price FROM manual_positions WHERE id = ? AND status = 'OPEN'",
+        (position_id,),
+    ).fetchone()
+    if not row:
+        db.close()
+        return
+    entry_price = row["entry_price"]
+    exit_price = 100.0 if won else 0.0
+    profit_loss = exit_price - entry_price
+    db.execute(
+        """UPDATE manual_positions
+        SET exit_price = ?, exit_timestamp = ?, profit_loss = ?, status = 'CLOSED'
+        WHERE id = ?""",
+        (exit_price, time.time(), profit_loss, position_id),
+    )
+    db.commit()
+    db.close()
+
+
+def close_manual_position_by_ticker(ticker: str, exit_price: float):
+    """Close a manual position by ticker with the given exit price."""
+    db = get_db()
+    now = time.time()
+    db.execute(
+        """UPDATE manual_positions
+        SET exit_price = ?, exit_timestamp = ?,
+            profit_loss = ? - entry_price,
+            status = 'CLOSED'
+        WHERE ticker = ? AND status = 'OPEN'""",
+        (exit_price, now, exit_price, ticker),
+    )
+    db.commit()
+    db.close()
+
+
+def get_open_manual_positions() -> list[dict]:
+    """Return all open manual positions."""
+    db = get_db()
+    rows = db.execute("SELECT * FROM manual_positions WHERE status = 'OPEN'").fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+def get_manual_position_stats() -> dict:
+    """Aggregate stats for manual positions."""
+    db = get_db()
+    open_count = db.execute(
+        "SELECT COUNT(*) FROM manual_positions WHERE status = 'OPEN'"
+    ).fetchone()[0]
+    closed = db.execute(
+        """SELECT COUNT(*) as cnt,
+                  SUM(profit_loss) as total_pnl,
+                  SUM(CASE WHEN profit_loss > 0 THEN 1 ELSE 0 END) as wins
+           FROM manual_positions WHERE status = 'CLOSED'"""
+    ).fetchone()
+    closed_count = closed["cnt"] or 0
+    total_pnl = closed["total_pnl"] or 0.0
+    wins = closed["wins"] or 0
+    db.close()
+    return {
+        "open_count": open_count,
+        "closed_count": closed_count,
+        "total_realized_pnl": total_pnl,
+        "win_rate": wins / closed_count if closed_count > 0 else 0.0,
+        "wins": wins,
+        "losses": closed_count - wins,
+    }
+
+
+def get_recommendation_stats() -> dict:
+    """Calculate win rate for all BET recommendations (from decisions/outcomes tables)."""
+    db = get_db()
+    row = db.execute(
+        """SELECT
+               COUNT(*) as total,
+               SUM(CASE WHEN out.result = 'WIN' THEN 1 ELSE 0 END) as wins,
+               SUM(CASE WHEN out.result = 'LOSS' THEN 1 ELSE 0 END) as losses
+           FROM decisions d
+           JOIN opportunities o ON o.id = d.opportunity_id
+           LEFT JOIN outcomes out ON out.opportunity_id = o.id
+           WHERE d.decision = 'BET'"""
+    ).fetchone()
+    db.close()
+    total = row["total"] or 0
+    wins = row["wins"] or 0
+    losses = row["losses"] or 0
+    settled = wins + losses
+    return {
+        "total_recommendations": total,
+        "settled": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wins / settled if settled > 0 else 0.0,
     }
 
 
